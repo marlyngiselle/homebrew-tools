@@ -1,0 +1,114 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+jobs:
+  unit:
+    name: Lint and unit tests
+    runs-on: macos-15
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Full history and tags: the tarball check rebuilds the released tag.
+          fetch-depth: 0
+
+      - name: Install test tools
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: brew install bats-core shellcheck actionlint
+
+      - name: ShellCheck, ruby -c and actionlint
+        run: make lint
+
+      - name: bats on the macOS system bash 3.2
+        # The tools ship as plain scripts and run under /bin/bash on a Mac,
+        # so the suites run there too, not on a newer Homebrew bash.
+        run: |
+          mkdir -p "$RUNNER_TEMP/bash32"
+          ln -sf /bin/bash "$RUNNER_TEMP/bash32/bash"
+          PATH="$RUNNER_TEMP/bash32:$PATH" bash -c 'echo "bash $BASH_VERSION"'
+          PATH="$RUNNER_TEMP/bash32:$PATH" bats --tap tools/*/test tests
+
+      - name: Formula checksums match the released tarball
+        # Rebuilds the tarball from the tag the formulae point to and checks
+        # every url and sha256. Skipped until that tag exists.
+        run: |
+          version="$(sed -n 's|^  url ".*/releases/download/v\([0-9.]*\)/.*|\1|p' Formula/portcheck.rb)"
+          if ! git rev-parse --verify --quiet "refs/tags/v$version" >/dev/null; then
+            echo "::notice::tag v$version does not exist yet, skipping the checksum check"
+            exit 0
+          fi
+          sum="$(REF="v$version" scripts/build-tarball.sh "$version" "$RUNNER_TEMP/dist" | awk '{ print $1 }')"
+          scripts/bump-formula.sh --check --version "$version" --sha256 "$sum" Formula/*.rb
+
+  test-bot:
+    name: brew test-bot (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Set up Homebrew
+        id: set-up-homebrew
+        # Checks this repository out as the marlyngiselle/tools tap.
+        uses: Homebrew/actions/setup-homebrew@4790763c0a3ba4036f72634dc079c4a7dfcd4878 # 2026.10.19.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache Homebrew Bundler RubyGems
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.set-up-homebrew.outputs.gems-path }}
+          key: ${{ matrix.os }}-rubygems-${{ steps.set-up-homebrew.outputs.gems-hash }}
+          restore-keys: ${{ matrix.os }}-rubygems-
+
+      - name: Clean up the runner
+        run: brew test-bot --only-cleanup-before
+
+      - name: Check the environment
+        run: brew test-bot --only-setup
+
+      - name: Tap syntax (brew style and brew audit for the whole tap)
+        run: brew test-bot --only-tap-syntax
+
+      - name: Build, test and bottle the formulae this pull request changes
+        if: github.event_name == 'pull_request'
+        # --skip-new: audit new formulae with --strict instead of --new, whose
+        # notability rules (stars, forks) are meant for homebrew/core.
+        run: brew test-bot --only-formulae --skip-new
+
+      - name: Upload bottles for inspection
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bottles_${{ matrix.os }}
+          path: "*.bottle.*"
+          if-no-files-found: ignore
+          retention-days: 7

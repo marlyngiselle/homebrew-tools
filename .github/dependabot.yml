@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # Keeps the SHA-pinned actions current. Each bump arrives as a pull request
+  # with the new commit SHA and the matching version comment.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "ci"

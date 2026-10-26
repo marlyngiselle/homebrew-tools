@@ -1,0 +1,209 @@
+name: release
+
+# Pushing a tag such as v0.2.0 on main runs the whole release:
+#
+#   source    build the reproducible tarball, create the GitHub release
+#             (as a prerelease) and attach the tarball and its checksum
+#   bottles   on each macOS runner, point the formulae at the new tarball,
+#             then build, test and bottle them with brew test-bot
+#   publish   upload the bottles to the same release, write the bottle
+#             blocks, push a release/<tag> branch and open a pull request
+#
+# Nothing is pushed to main. The pull request is the only way the new
+# version reaches users, and merging it is a human decision.
+# See docs/release-process.md.
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+env:
+  TAG: ${{ github.ref_name }}
+
+jobs:
+  source:
+    name: Source tarball and GitHub release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the release and upload the tarball
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+      sha256: ${{ steps.build.outputs.sha256 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Refuse tags that are not on main
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            echo "::error::$TAG points to a commit that is not on main"
+            exit 1
+          fi
+
+      - name: Build the tarball
+        id: build
+        run: |
+          version="${TAG#v}"
+          line="$(REF="$GITHUB_SHA" scripts/build-tarball.sh "$version" dist)"
+          sha256="${line%% *}"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "sha256=$sha256" >>"$GITHUB_OUTPUT"
+          {
+            echo "### Source tarball"
+            echo
+            echo "| File | sha256 |"
+            echo "| --- | --- |"
+            echo "| \`homebrew-tools-$version.tar.gz\` | \`$sha256\` |"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Create the release, or refresh its assets on a re-run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            # A prerelease, not a draft: brew must be able to download the
+            # tarball while the bottles are built. It becomes final at the end.
+            gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" \
+              --verify-tag --prerelease --title "$TAG" --generate-notes
+          fi
+
+  bottles:
+    name: Bottles (${{ matrix.os }})
+    needs: source
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.source.outputs.version }}
+      SHA256: ${{ needs.source.outputs.sha256 }}
+    steps:
+      - name: Set up Homebrew
+        id: set-up-homebrew
+        # Checks out the tagged commit as the tap, in the workspace.
+        uses: Homebrew/actions/setup-homebrew@4790763c0a3ba4036f72634dc079c4a7dfcd4878 # 2026.10.19.1
+
+      - name: Cache Homebrew Bundler RubyGems
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.set-up-homebrew.outputs.gems-path }}
+          key: ${{ matrix.os }}-rubygems-${{ steps.set-up-homebrew.outputs.gems-hash }}
+          restore-keys: ${{ matrix.os }}-rubygems-
+
+      - name: Clean up the runner
+        run: brew test-bot --only-cleanup-before
+
+      - name: Check the environment
+        run: brew test-bot --only-setup
+
+      - name: Point the formulae at the new tarball (local commit only)
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          scripts/bump-formula.sh --version "$VERSION" --sha256 "$SHA256" Formula/*.rb
+          git add Formula
+          git diff --cached --quiet || git commit --quiet -m "chore(formula): bump to $VERSION"
+
+      - name: Build, test and bottle every formula
+        env:
+          TAP: ${{ steps.set-up-homebrew.outputs.tap-name }}
+        run: |
+          formulae="$(find Formula -name '*.rb' -exec basename {} .rb \; | sort | sed "s|^|$TAP/|" | paste -sd, -)"
+          echo "Testing $formulae"
+          brew test-bot --only-formulae --tap="$TAP" --testing-formulae="$formulae" \
+            --root-url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+
+      - name: Keep the bottles for the publish job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bottles_${{ matrix.os }}
+          path: "*.bottle.*"
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish bottles and open the formula pull request
+    needs: [source, bottles]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Add required reviewers to this environment to hold every release
+    # for a manual approval before anything is uploaded or pushed.
+    environment: release
+    permissions:
+      contents: write # upload bottles to the release, push release/<tag>
+      pull-requests: write # open the pull request
+    env:
+      VERSION: ${{ needs.source.outputs.version }}
+      SHA256: ${{ needs.source.outputs.sha256 }}
+      BRANCH: release/${{ github.ref_name }}
+    steps:
+      - name: Set up Homebrew
+        id: set-up-homebrew
+        uses: Homebrew/actions/setup-homebrew@4790763c0a3ba4036f72634dc079c4a7dfcd4878 # 2026.10.19.1
+        with:
+          token: ${{ github.token }} # lets git push the release branch
+
+      - name: Download the bottles
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: bottles_*
+          path: bottles
+          merge-multiple: true
+
+      - name: Branch and bump the formulae
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          scripts/bump-formula.sh --version "$VERSION" --sha256 "$SHA256" Formula/*.rb
+          git add Formula
+          git diff --cached --quiet || git commit --quiet -m "chore(formula): bump to $VERSION"
+
+      - name: Write bottle blocks and upload bottles to the release
+        # The brew pr-pull step without the pull: merges the bottle JSON from
+        # every runner into each formula (one commit per formula) and uploads
+        # the bottles as assets of the release named in their root_url.
+        working-directory: bottles
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+        run: |
+          ls -l
+          brew pr-upload --verbose
+
+      - name: Push the branch and open the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git log --oneline "origin/main..$BRANCH"
+          git push --force-with-lease origin "$BRANCH"
+          if [ -z "$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --json number --jq '.[].number')" ]; then
+            gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" \
+              --title "chore(formula): release $TAG" \
+              --body "Points every formula at the $TAG tarball (sha256 \`$SHA256\`) and adds the bottles built and tested by the release run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Merge to ship $TAG to \`brew upgrade\`."
+          fi
+
+      - name: Mark the release as final
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest
