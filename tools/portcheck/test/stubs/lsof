@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Test double for lsof: records its arguments and replays a fixture.
+printf '%s\n' "$*" >>"${STUB_LOG:?}"
+if [ -n "${LSOF_FIXTURE:-}" ] && [ -s "$LSOF_FIXTURE" ]; then
+  cat "$LSOF_FIXTURE"
+  exit 0
+fi
+exit 1

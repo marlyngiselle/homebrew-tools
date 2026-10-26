@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+# portcheck: show which process listens on a TCP port, and stop it safely.
+#
+# Read-only by default. Stopping a process needs --kill, a confirmation
+# (or --yes when there is no terminal), and never touches PID 1 or launchd.
+
+set -euo pipefail
+
+VERSION="dev"
+PROG="portcheck"
+
+readonly EX_OK=0 EX_FREE=1 EX_FAIL=2 EX_USAGE=64 EX_UNAVAILABLE=69 EX_REFUSED=77
+
+usage() {
+  cat <<EOF
+Usage: $PROG [options] PORT
+
+Show which process listens on a TCP port, and optionally stop it.
+
+Options:
+  -j, --json          Print the listeners as JSON
+  -k, --kill          Stop the listening process(es) with SIGTERM
+  -f, --force         With --kill, send SIGKILL if SIGTERM was not enough
+  -t, --timeout SECS  Seconds to wait after SIGTERM (default: 5)
+  -n, --dry-run       With --kill, print the signals without sending them
+  -y, --yes           Do not ask for confirmation (needed without a terminal)
+  -h, --help          Show this help
+  -V, --version       Show the version
+
+Exit codes:
+  0   a listener was found (and stopped, with --kill)
+  1   nothing listens on the port
+  2   the process could not be stopped
+  64  usage error
+  69  lsof is not available
+  77  refused (protected process, other user, or no confirmation)
+EOF
+}
+
+die() {
+  local code="$1"
+  shift
+  printf '%s: %s\n' "$PROG" "$*" >&2
+  exit "$code"
+}
+
+log() { printf '%s: %s\n' "$PROG" "$*" >&2; }
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\t'/\\t}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  printf '%s' "$s"
+}
+
+# Prints one line per listening process: pid<TAB>command<TAB>user<TAB>addresses
+list_listeners() {
+  local port="$1"
+  # lsof exits 1 when nothing matches; that is not an error here.
+  lsof -nP -iTCP:"$port" -sTCP:LISTEN -F pcLn 2>/dev/null | awk '
+    function flush() {
+      if (pid != "") printf "%s\t%s\t%s\t%s\n", pid, cmd, user, addrs
+    }
+    /^p/ { flush(); pid = substr($0, 2); cmd = ""; user = ""; addrs = ""; next }
+    /^c/ { cmd = substr($0, 2); next }
+    /^L/ { user = substr($0, 2); next }
+    /^n/ {
+      a = substr($0, 2)
+      if (index("," addrs ",", "," a ",") == 0) addrs = (addrs == "" ? a : addrs "," a)
+      next
+    }
+    END { flush() }
+  ' || true
+}
+
+print_table() {
+  local rows="$1"
+  printf '%-8s %-20s %-14s %s\n' "PID" "COMMAND" "USER" "ADDRESS"
+  local pid cmd user addrs
+  while IFS=$'\t' read -r pid cmd user addrs; do
+    [ -n "$pid" ] || continue
+    printf '%-8s %-20s %-14s %s\n' "$pid" "$cmd" "${user:--}" "$addrs"
+  done <<<"$rows"
+}
+
+print_json() {
+  local port="$1" rows="$2" first=1
+  local pid cmd user addrs
+  printf '{\n  "port": %s,\n  "listeners": [' "$port"
+  while IFS=$'\t' read -r pid cmd user addrs; do
+    [ -n "$pid" ] || continue
+    if [ "$first" -eq 1 ]; then first=0; else printf ','; fi
+    printf '\n    {"pid": %s, "command": "%s", "user": "%s", "addresses": [' \
+      "$pid" "$(json_escape "$cmd")" "$(json_escape "$user")"
+    local IFS_SAVE="$IFS" a sep=""
+    IFS=','
+    for a in $addrs; do
+      printf '%s"%s"' "$sep" "$(json_escape "$a")"
+      sep=", "
+    done
+    IFS="$IFS_SAVE"
+    printf ']}'
+  done <<<"$rows"
+  if [ "$first" -eq 1 ]; then printf ']\n}\n'; else printf '\n  ]\n}\n'; fi
+}
+
+is_protected() {
+  local pid="$1" cmd="$2"
+  [ "$pid" -le 1 ] && return 0
+  [ "$pid" -eq "$$" ] && return 0
+  [ "$pid" -eq "$PPID" ] && return 0
+  case "$cmd" in
+    launchd | kernel_task | systemd | init) return 0 ;;
+  esac
+  return 1
+}
+
+confirm() {
+  local prompt="$1" answer
+  if [ "$ASSUME_YES" -eq 1 ]; then return 0; fi
+  if [ ! -t 0 ]; then
+    die "$EX_REFUSED" "refusing to stop a process without a terminal; pass --yes to confirm"
+  fi
+  printf '%s [y/N] ' "$prompt" >&2
+  read -r answer || answer=""
+  case "$answer" in
+    y | Y | yes | YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+wait_for_exit() {
+  local pid="$1" timeout="$2" waited=0
+  # Poll in tenths of a second so short timeouts stay responsive.
+  local limit=$((timeout * 10))
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$limit" ]; then return 1; fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  return 0
+}
+
+stop_listener() {
+  local pid="$1" cmd="$2" user="$3"
+  local me
+  me="$(id -un)"
+
+  if is_protected "$pid" "$cmd"; then
+    log "refusing to stop protected process $pid ($cmd)"
+    return "$EX_REFUSED"
+  fi
+  if [ -n "$user" ] && [ "$user" != "$me" ] && [ "$(id -u)" -ne 0 ]; then
+    log "process $pid ($cmd) belongs to $user; run with sudo to stop it"
+    return "$EX_REFUSED"
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf 'DRY-RUN: kill -TERM %s\n' "$pid"
+    [ "$FORCE" -eq 1 ] && printf 'DRY-RUN: kill -KILL %s  # only if still running after %ss\n' "$pid" "$TIMEOUT"
+    return 0
+  fi
+
+  if ! confirm "Stop PID $pid ($cmd, user ${user:-unknown}) listening on port $PORT?"; then
+    log "left $pid running"
+    return "$EX_REFUSED"
+  fi
+
+  kill -TERM "$pid" 2>/dev/null || true
+  if wait_for_exit "$pid" "$TIMEOUT"; then
+    log "stopped $pid ($cmd) with SIGTERM"
+    return 0
+  fi
+  if [ "$FORCE" -eq 1 ]; then
+    kill -KILL "$pid" 2>/dev/null || true
+    if wait_for_exit "$pid" 2; then
+      log "stopped $pid ($cmd) with SIGKILL"
+      return 0
+    fi
+  fi
+  if [ "$FORCE" -eq 1 ]; then
+    log "process $pid ($cmd) survived SIGTERM and SIGKILL"
+  else
+    log "process $pid ($cmd) is still running after ${TIMEOUT}s; add --force to send SIGKILL"
+  fi
+  return "$EX_FAIL"
+}
+
+JSON=0 KILL=0 FORCE=0 DRY_RUN=0 ASSUME_YES=0 TIMEOUT=5 PORT=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -j | --json) JSON=1 ;;
+    -k | --kill) KILL=1 ;;
+    -f | --force) FORCE=1 ;;
+    -n | --dry-run) DRY_RUN=1 ;;
+    -y | --yes) ASSUME_YES=1 ;;
+    -t | --timeout)
+      [ "$#" -ge 2 ] || die "$EX_USAGE" "--timeout needs a value"
+      TIMEOUT="$2"
+      shift
+      ;;
+    --timeout=*) TIMEOUT="${1#*=}" ;;
+    -h | --help)
+      usage
+      exit "$EX_OK"
+      ;;
+    -V | --version)
+      printf '%s %s\n' "$PROG" "$VERSION"
+      exit "$EX_OK"
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*) die "$EX_USAGE" "unknown option: $1 (see --help)" ;;
+    *)
+      [ -z "$PORT" ] || die "$EX_USAGE" "only one PORT is accepted"
+      PORT="$1"
+      ;;
+  esac
+  shift
+done
+if [ "$#" -gt 0 ] && [ -z "$PORT" ]; then PORT="$1"; fi
+
+[ -n "$PORT" ] || {
+  usage >&2
+  exit "$EX_USAGE"
+}
+case "$PORT" in
+  '' | *[!0-9]*) die "$EX_USAGE" "PORT must be a number between 1 and 65535" ;;
+esac
+if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+  die "$EX_USAGE" "PORT must be a number between 1 and 65535"
+fi
+case "$TIMEOUT" in
+  '' | *[!0-9]*) die "$EX_USAGE" "--timeout must be a whole number of seconds" ;;
+esac
+if [ "$FORCE" -eq 1 ] && [ "$KILL" -eq 0 ]; then
+  die "$EX_USAGE" "--force only makes sense with --kill"
+fi
+
+command -v lsof >/dev/null 2>&1 || die "$EX_UNAVAILABLE" "lsof is required but was not found on PATH"
+
+ROWS="$(list_listeners "$PORT")"
+
+if [ "$JSON" -eq 1 ]; then
+  print_json "$PORT" "$ROWS"
+elif [ -n "$ROWS" ]; then
+  print_table "$ROWS"
+fi
+
+if [ -z "$ROWS" ]; then
+  [ "$JSON" -eq 1 ] || log "nothing listens on TCP port $PORT"
+  exit "$EX_FREE"
+fi
+
+[ "$KILL" -eq 1 ] || exit "$EX_OK"
+
+# Read the rows into arrays first, so stdin stays free for the confirmation.
+pids=() cmds=() users=()
+while IFS=$'\t' read -r pid cmd user _; do
+  [ -n "$pid" ] || continue
+  pids+=("$pid")
+  cmds+=("$cmd")
+  users+=("$user")
+done <<<"$ROWS"
+
+status=0
+i=0
+while [ "$i" -lt "${#pids[@]}" ]; do
+  rc=0
+  stop_listener "${pids[$i]}" "${cmds[$i]}" "${users[$i]}" || rc=$?
+  if [ "$rc" -gt "$status" ]; then status="$rc"; fi
+  i=$((i + 1))
+done
+exit "$status"

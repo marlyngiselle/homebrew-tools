@@ -1,0 +1,79 @@
+.TH PORTCHECK 1 "October 26, 2026" "homebrew-tools" "User Commands"
+.SH NAME
+portcheck \- show which process listens on a TCP port, and stop it safely
+.SH SYNOPSIS
+.B portcheck
+[\fB\-j\fR]
+[\fB\-k\fR [\fB\-f\fR] [\fB\-t\fR \fISECS\fR] [\fB\-n\fR] [\fB\-y\fR]]
+.I PORT
+.SH DESCRIPTION
+.B portcheck
+asks
+.BR lsof (8)
+for the processes listening on TCP
+.I PORT
+and prints their PID, command, owner and bound addresses.
+It is read\-only unless
+.B \-\-kill
+is given.
+.PP
+Stopping a process sends SIGTERM, waits, and only escalates to SIGKILL with
+.BR \-\-force .
+PID 1, launchd, the calling shell and processes owned by another user (unless
+running as root) are never signalled.
+Without a terminal, a stop requires
+.BR \-\-yes .
+.SH OPTIONS
+.TP
+.BR \-j ", " \-\-json
+Print the listeners as JSON.
+.TP
+.BR \-k ", " \-\-kill
+Stop the listening process(es) with SIGTERM after confirmation.
+.TP
+.BR \-f ", " \-\-force
+With \-\-kill, send SIGKILL if the process survives SIGTERM.
+.TP
+.BR \-t ", " \-\-timeout " " \fISECS\fR
+Seconds to wait after SIGTERM. Default 5.
+.TP
+.BR \-n ", " \-\-dry\-run
+Print the signals that would be sent, and send none.
+.TP
+.BR \-y ", " \-\-yes
+Do not ask for confirmation.
+.TP
+.BR \-h ", " \-\-help
+Show usage.
+.TP
+.BR \-V ", " \-\-version
+Show the version.
+.SH EXIT STATUS
+.TP
+.B 0
+A listener was found, and stopped when \-\-kill was given.
+.TP
+.B 1
+Nothing listens on the port.
+.TP
+.B 2
+The process could not be stopped.
+.TP
+.B 64
+Usage error.
+.TP
+.B 69
+lsof is not available.
+.TP
+.B 77
+Refused: protected process, another user's process, or no confirmation.
+.SH EXAMPLES
+.nf
+portcheck 3000
+portcheck \-\-json 5432 | jq '.listeners[].pid'
+portcheck \-\-kill \-\-dry\-run \-\-force 8080
+portcheck \-\-kill 8080
+.fi
+.SH SEE ALSO
+.BR lsof (8),
+.BR kill (1)
