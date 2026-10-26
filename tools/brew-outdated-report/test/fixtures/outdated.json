@@ -1,0 +1,12 @@
+{
+  "formulae": [
+    {"name": "zstd", "installed_versions": ["1.5.6"], "current_version": "1.5.7", "pinned": false, "pinned_version": null},
+    {"name": "node", "installed_versions": ["22.9.0"], "current_version": "24.1.0", "pinned": false, "pinned_version": null},
+    {"name": "jq", "installed_versions": ["1.7.1"], "current_version": "1.7.1_1", "pinned": false, "pinned_version": null},
+    {"name": "postgresql@16", "installed_versions": ["16.3"], "current_version": "16.4", "pinned": true, "pinned_version": "16.3"},
+    {"name": "git", "installed_versions": ["2.46.0", "2.47.0"], "current_version": "2.48.1", "pinned": false, "pinned_version": null}
+  ],
+  "casks": [
+    {"name": "visual-studio-code", "installed_versions": ["1.94.0"], "current_version": "1.95.2"}
+  ]
+}

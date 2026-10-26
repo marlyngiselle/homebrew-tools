@@ -1,0 +1,71 @@
+.TH BREW-OUTDATED-REPORT 1 "October 26, 2026" "homebrew-tools" "User Commands"
+.SH NAME
+brew-outdated-report \- Markdown report of outdated Homebrew packages
+.SH SYNOPSIS
+.B brew-outdated-report
+[\fB\-i\fR \fIFILE\fR] [\fB\-g\fR]
+[\fB\-o\fR \fIFILE\fR] [\fB\-\-title\fR \fITEXT\fR]
+[\fB\-\-fail\-on\-outdated\fR]
+.SH DESCRIPTION
+.B brew-outdated-report
+runs
+.B brew outdated \-\-json=v2
+with auto\-update disabled, or reads that JSON from a file, and writes a
+Markdown report: a summary table, one table for formulae and one for casks,
+and the exact upgrade commands.
+.PP
+Every change is classified as major, minor, patch, other or rebuild (a
+Homebrew revision such as 1.7.1_1), and rows are sorted by that severity.
+Pinned formulae are listed but left out of the upgrade command.
+The tool never upgrades anything.
+.SH OPTIONS
+.TP
+.BR \-i ", " \-\-input " " \fIFILE\fR
+Read the JSON from \fIFILE\fR, or from standard input when \fIFILE\fR is \-.
+.TP
+.BR \-g ", " \-\-greedy
+Include casks that update themselves.
+.TP
+.BR \-o ", " \-\-output " " \fIFILE\fR
+Write the report to \fIFILE\fR.
+.TP
+.BI \-\-title " TEXT"
+Title of the report.
+.TP
+.B \-\-fail\-on\-outdated
+Exit 1 when anything is outdated.
+.TP
+.BR \-h ", " \-\-help
+Show usage.
+.TP
+.BR \-V ", " \-\-version
+Show the version.
+.SH ENVIRONMENT
+.TP
+.B SOURCE_DATE_EPOCH
+When set, fixes the report timestamp, so the same input gives the same bytes.
+.SH EXIT STATUS
+.TP
+.B 0
+Report written.
+.TP
+.B 1
+Report written and something is outdated, with \-\-fail\-on\-outdated.
+.TP
+.B 64
+Usage error.
+.TP
+.B 65
+The input is not brew outdated \-\-json=v2 output.
+.TP
+.B 69
+jq or brew is not available.
+.SH EXAMPLES
+.nf
+brew\-outdated\-report > outdated.md
+brew\-outdated\-report \-\-greedy \-\-output ~/Desktop/brew.md
+brew outdated \-\-json=v2 | brew\-outdated\-report \-\-input \-
+.fi
+.SH SEE ALSO
+.BR brew (1),
+.BR jq (1)

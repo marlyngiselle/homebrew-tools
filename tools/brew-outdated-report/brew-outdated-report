@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+# brew-outdated-report: turn `brew outdated --json=v2` into a Markdown
+# report that reads well in a pull request, an issue or a team wiki.
+# Read-only: it never upgrades anything, it prints the commands instead.
+
+set -euo pipefail
+
+VERSION="dev"
+PROG="brew-outdated-report"
+
+readonly EX_OK=0 EX_OUTDATED=1 EX_USAGE=64 EX_DATAERR=65 EX_UNAVAILABLE=69
+
+usage() {
+  cat <<EOF
+Usage: $PROG [options]
+
+Write a Markdown report of outdated Homebrew formulae and casks, with the
+size of each change (major, minor, patch) and the upgrade commands.
+
+Options:
+  -i, --input FILE      Read brew outdated --json=v2 output from FILE ("-" for stdin)
+                        instead of running brew
+  -g, --greedy          Include casks that auto-update (passed to brew outdated)
+  -o, --output FILE     Write the report to FILE instead of stdout
+      --title TEXT      Report title (default: "Homebrew outdated report")
+      --fail-on-outdated
+                        Exit 1 when anything is outdated (useful in CI)
+  -h, --help            Show this help
+  -V, --version         Show the version
+
+SOURCE_DATE_EPOCH, when set, fixes the timestamp for reproducible reports.
+
+Exit codes:
+  0   report written
+  1   report written and something is outdated (with --fail-on-outdated)
+  64  usage error
+  65  the input is not brew outdated --json=v2 output
+  69  jq or brew is not available
+EOF
+}
+
+die() {
+  local code="$1"
+  shift
+  printf '%s: %s\n' "$PROG" "$*" >&2
+  exit "$code"
+}
+
+INPUT="" GREEDY=0 OUTPUT="" TITLE="Homebrew outdated report" FAIL_ON_OUTDATED=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -i | --input | -o | --output | --title)
+      [ "$#" -ge 2 ] || die "$EX_USAGE" "$1 needs a value"
+      case "$1" in
+        -i | --input) INPUT="$2" ;;
+        -o | --output) OUTPUT="$2" ;;
+        --title) TITLE="$2" ;;
+      esac
+      shift
+      ;;
+    -g | --greedy) GREEDY=1 ;;
+    --fail-on-outdated) FAIL_ON_OUTDATED=1 ;;
+    -h | --help)
+      usage
+      exit "$EX_OK"
+      ;;
+    -V | --version)
+      printf '%s %s\n' "$PROG" "$VERSION"
+      exit "$EX_OK"
+      ;;
+    *) die "$EX_USAGE" "unknown argument: $1 (see --help)" ;;
+  esac
+  shift
+done
+
+command -v jq >/dev/null 2>&1 || die "$EX_UNAVAILABLE" "jq is required but was not found on PATH"
+
+if [ -n "$INPUT" ]; then
+  if [ "$INPUT" = "-" ]; then
+    DATA="$(cat)"
+  else
+    [ -r "$INPUT" ] || die "$EX_USAGE" "cannot read $INPUT"
+    DATA="$(cat "$INPUT")"
+  fi
+else
+  command -v brew >/dev/null 2>&1 || die "$EX_UNAVAILABLE" "brew was not found on PATH (or pass --input)"
+  args=(outdated --json=v2)
+  [ "$GREEDY" -eq 0 ] || args+=(--greedy)
+  DATA="$(HOMEBREW_NO_AUTO_UPDATE=1 brew "${args[@]}")" || die "$EX_UNAVAILABLE" "brew outdated failed"
+fi
+
+printf '%s' "$DATA" | jq -e 'type == "object" and (.formulae | type == "array") and (.casks | type == "array")' >/dev/null 2>&1 ||
+  die "$EX_DATAERR" "input is not brew outdated --json=v2 output"
+
+if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
+  NOW="$(date -u -r "$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null ||
+    date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ)"
+else
+  NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+fi
+
+# The whole report is one jq program: classification, sorting and layout.
+REPORT="$(printf '%s' "$DATA" | jq -r --arg title "$TITLE" --arg now "$NOW" --arg tool "$PROG $VERSION" '
+  # "1.2.3_1" -> "1.2.3": the suffix is a Homebrew rebuild, not a release.
+  def base: sub("_[0-9]+$"; "");
+  def parts: base | split(".") | map(tonumber? // .);
+  def change($from; $to):
+    if ($from | base) == ($to | base) then "rebuild"
+    else ($from | parts) as $a | ($to | parts) as $b |
+      if ($a[0] != $b[0]) then "major"
+      elif ($a[1] != $b[1]) then "minor"
+      elif ($a[2] != $b[2]) then "patch"
+      else "other" end
+    end;
+  def rank: {"major": 0, "minor": 1, "patch": 2, "other": 3, "rebuild": 4}[.];
+  def rows:
+    map(. + {
+      installed: (.installed_versions | last // "?"),
+      change: change(.installed_versions | last // "0"; .current_version)
+    })
+    | sort_by((.change | rank), .name);
+  def table($items):
+    if ($items | length) == 0 then "Nothing outdated."
+    else
+      "| Name | Installed | Latest | Change | Pinned |\n| --- | --- | --- | --- | --- |\n" +
+      ($items | map("| `\(.name)` | \(.installed) | \(.current_version) | \(.change) | \(if .pinned then "yes" else "no" end) |") | join("\n"))
+    end;
+
+  (.formulae | rows) as $f
+  | (.casks | rows) as $c
+  | ($f | map(select(.pinned | not) | .name)) as $fu
+  | ($c | map(.name)) as $cu
+  | [
+      "# \($title)",
+      "",
+      "Generated \($now) by \($tool).",
+      "",
+      "## Summary",
+      "",
+      "| Metric | Count |",
+      "| --- | --- |",
+      "| Outdated formulae | \($f | length) |",
+      "| Outdated casks | \($c | length) |",
+      "| Major upgrades | \([$f[], $c[]] | map(select(.change == "major")) | length) |",
+      "| Pinned, held back | \($f | map(select(.pinned)) | length) |",
+      "",
+      "## Formulae",
+      "",
+      table($f),
+      "",
+      "## Casks",
+      "",
+      table($c),
+      "",
+      "## Upgrade",
+      "",
+      if ($fu | length) == 0 and ($cu | length) == 0 then "Everything is up to date."
+      else
+        "```bash\n" +
+        ([ (if ($fu | length) > 0 then "brew upgrade " + ($fu | join(" ")) else empty end),
+           (if ($cu | length) > 0 then "brew upgrade --cask " + ($cu | join(" ")) else empty end)
+         ] | join("\n")) +
+        "\n```" +
+        (if ($f | map(select(.pinned)) | length) > 0
+         then "\n\nPinned formulae are left out. Run `brew unpin <name>` first to include them."
+         else "" end)
+      end
+    ]
+  | join("\n")
+')"
+
+if [ -n "$OUTPUT" ]; then
+  printf '%s\n' "$REPORT" >"$OUTPUT"
+else
+  printf '%s\n' "$REPORT"
+fi
+
+if [ "$FAIL_ON_OUTDATED" -eq 1 ] &&
+  [ "$(printf '%s' "$DATA" | jq '(.formulae | length) + (.casks | length)')" -gt 0 ]; then
+  exit "$EX_OUTDATED"
+fi
+exit "$EX_OK"

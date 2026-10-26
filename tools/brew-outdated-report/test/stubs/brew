@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Test double for brew: logs its arguments and replays $BREW_FIXTURE.
+printf '%s\n' "$*" >>"${STUB_LOG:?}"
+printf '%s\n' "${HOMEBREW_NO_AUTO_UPDATE:-unset}" >"$STUB_LOG.env"
+[ "${BREW_FAIL:-0}" -eq 0 ] || exit 1
+cat "${BREW_FIXTURE:?}"
