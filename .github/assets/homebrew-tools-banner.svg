@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-label="homebrew-tools, a Homebrew tap with a real release pipeline">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1f4d"/>
+      <stop offset="1" stop-color="#2456c8"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.06"/>
+    </linearGradient>
+    <linearGradient id="liquid" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#93c5fd"/>
+      <stop offset="1" stop-color="#3b82f6"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#ffffff" stroke-opacity="0.05" stroke-width="1"/>
+    </pattern>
+    <clipPath id="bottleClip">
+      <path d="M0 0 h36 v34 c0 10 34 18 34 46 v118 a14 14 0 0 1 -14 14 h-76 a14 14 0 0 1 -14 -14 v-118 c0 -28 34 -36 34 -46 z" transform="translate(-18 0)"/>
+    </clipPath>
+  </defs>
+
+  <rect width="1200" height="300" fill="url(#bg)"/>
+  <rect width="1200" height="300" fill="url(#grid)"/>
+
+  <!-- pipeline: tag, tarball, bottles, release -->
+  <g stroke="#93c5fd" stroke-opacity="0.55" stroke-width="2" fill="none" stroke-dasharray="6 6">
+    <path d="M672 236 H760"/>
+    <path d="M846 236 H900"/>
+    <path d="M1032 236 H1090"/>
+  </g>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" fill="#dbeafe" fill-opacity="0.85">
+    <text x="606" y="282">tag</text>
+    <text x="772" y="282">tarball</text>
+    <text x="936" y="282">bottles</text>
+    <text x="1092" y="282">release</text>
+  </g>
+
+  <!-- tag -->
+  <g transform="translate(600 214)">
+    <path d="M0 0 h50 l22 22 l-22 22 h-50 z" fill="#0b1f4d" fill-opacity="0.55" stroke="#ffffff" stroke-width="2.5" stroke-linejoin="round"/>
+    <circle cx="50" cy="22" r="4.5" fill="#ffffff"/>
+  </g>
+
+  <!-- package box (isometric) -->
+  <g transform="translate(803 236)" stroke="#ffffff" stroke-width="2.5" stroke-linejoin="round">
+    <path d="M0 -30 L34 -14 L0 2 L-34 -14 Z" fill="#3b82f6"/>
+    <path d="M-34 -14 L0 2 L0 34 L-34 18 Z" fill="#1e3a8a"/>
+    <path d="M34 -14 L0 2 L0 34 L34 18 Z" fill="#2456c8"/>
+    <path d="M-17 -22 L17 -6" stroke="#dbeafe" stroke-width="2"/>
+  </g>
+
+  <!-- three small bottles -->
+  <g transform="translate(944 206)" stroke="#ffffff" stroke-width="2.2" stroke-linejoin="round">
+    <path d="M-30 0 h10 v10 c0 4 10 6 10 14 v28 a5 5 0 0 1 -5 5 h-20 a5 5 0 0 1 -5 -5 v-28 c0 -8 10 -10 10 -14 z" fill="#93c5fd"/>
+    <path d="M6 -8 h12 v12 c0 4 12 7 12 16 v34 a6 6 0 0 1 -6 6 h-24 a6 6 0 0 1 -6 -6 v-34 c0 -9 12 -12 12 -16 z" fill="#ffffff" fill-opacity="0.9"/>
+    <path d="M48 0 h10 v10 c0 4 10 6 10 14 v28 a5 5 0 0 1 -5 5 h-20 a5 5 0 0 1 -5 -5 v-28 c0 -8 10 -10 10 -14 z" fill="#3b82f6"/>
+  </g>
+
+  <!-- release: stacked assets -->
+  <g transform="translate(1100 212)" stroke="#ffffff" stroke-width="2.2">
+    <rect x="0" y="0" width="54" height="12" rx="4" fill="#1e3a8a"/>
+    <rect x="0" y="16" width="54" height="12" rx="4" fill="#2456c8"/>
+    <rect x="0" y="32" width="54" height="12" rx="4" fill="#3b82f6"/>
+  </g>
+
+  <!-- hero bottle -->
+  <g transform="translate(877 24) scale(0.74)">
+    <g clip-path="url(#bottleClip)">
+      <rect x="-80" y="0" width="160" height="230" fill="url(#glass)"/>
+      <path d="M-80 120 C-50 110 -20 132 10 122 S60 112 80 120 V230 H-80 Z" fill="url(#liquid)" fill-opacity="0.9"/>
+      <circle cx="-22" cy="160" r="5" fill="#ffffff" fill-opacity="0.55"/>
+      <circle cx="8" cy="184" r="3.5" fill="#ffffff" fill-opacity="0.45"/>
+      <circle cx="24" cy="146" r="2.5" fill="#ffffff" fill-opacity="0.5"/>
+    </g>
+    <path d="M0 0 h36 v34 c0 10 34 18 34 46 v118 a14 14 0 0 1 -14 14 h-76 a14 14 0 0 1 -14 -14 v-118 c0 -28 34 -36 34 -46 z" transform="translate(-18 0)" fill="none" stroke="#ffffff" stroke-width="3" stroke-linejoin="round"/>
+    <rect x="-22" y="-8" width="44" height="14" rx="4" fill="#ffffff"/>
+    <rect x="-40" y="78" width="80" height="34" rx="6" fill="#0b1f4d" fill-opacity="0.75" stroke="#ffffff" stroke-opacity="0.6" stroke-width="1.5"/>
+    <text x="0" y="100" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" fill="#dbeafe">v0.1.0</text>
+  </g>
+
+  <!-- copy -->
+  <text x="64" y="118" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="54" font-weight="700" fill="#ffffff">homebrew-tools</text>
+  <text x="66" y="164" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="23" fill="#dbeafe">A Homebrew tap with a real release pipeline.</text>
+  <g transform="translate(64 196)">
+    <rect width="470" height="44" rx="10" fill="#0b1f4d" fill-opacity="0.6" stroke="#ffffff" stroke-opacity="0.25"/>
+    <text x="18" y="28" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16" fill="#93c5fd">$</text>
+    <text x="36" y="28" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16" fill="#ffffff">brew install marlyngiselle/tools/portcheck</text>
+  </g>
+</svg>
