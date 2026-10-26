@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Test double: replays $STUB_DIR/<name>.<last-arg>.out, <name>.<first-arg>.out
+# or <name>.out, and exits with $STUB_DIR/<name>.rc (default 0). Arguments are logged.
+name="$(basename "$0")"
+printf '%s %s\n' "$name" "$*" >>"${STUB_DIR:?}/calls.log"
+last="${*: -1}"
+for f in "$STUB_DIR/$name.${last#-}.out" "$STUB_DIR/$name.${1#-}.out" "$STUB_DIR/$name.out"; do
+  if [ -f "$f" ]; then
+    cat "$f"
+    break
+  fi
+done
+rc_file="$STUB_DIR/$name.rc"
+if [ -f "$rc_file" ]; then exit "$(cat "$rc_file")"; fi
+exit 0

@@ -1,0 +1,300 @@
+#!/usr/bin/env bash
+# wifi-diag: one-screen network diagnostics for macOS, built only on
+# commands that ship with the system (route, ipconfig, networksetup,
+# scutil, dscacheutil, ping, curl). Read-only, no sudo.
+
+set -euo pipefail
+
+VERSION="dev"
+PROG="wifi-diag"
+
+readonly EX_OK=0 EX_WARN=1 EX_FAIL=2 EX_USAGE=64 EX_UNAVAILABLE=69
+
+# Thresholds, in milliseconds. A local gateway should answer in a few ms.
+GATEWAY_WARN_MS=30
+INTERNET_WARN_MS=150
+
+CAPTIVE_URL="http://captive.apple.com/hotspot-detect.html"
+
+usage() {
+  cat <<EOF
+Usage: $PROG [options]
+
+Summarise the active network on macOS: interface, Wi-Fi network, IP,
+gateway, DNS, latency, name resolution and captive portal.
+
+Options:
+  -j, --json            Print the report as JSON
+  -i, --interface IF    Inspect IF instead of the default-route interface
+  -t, --target HOST     Host for the internet latency probe (default: 1.1.1.1)
+  -d, --dns-name NAME   Name to resolve for the DNS check (default: apple.com)
+  -c, --count N         Pings per probe (default: 3)
+      --no-network      Skip the active probes (ping, DNS, captive portal)
+  -h, --help            Show this help
+  -V, --version         Show the version
+
+Exit codes:
+  0   every check passed
+  1   at least one check is degraded (latency, packet loss, captive portal)
+  2   no connectivity (no default route, gateway or internet unreachable)
+  64  usage error
+  69  not macOS, or a required system command is missing
+EOF
+}
+
+die() {
+  local code="$1"
+  shift
+  printf '%s: %s\n' "$PROG" "$*" >&2
+  exit "$code"
+}
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\t'/\\t}"
+  s="${s//$'\n'/\\n}"
+  printf '%s' "$s"
+}
+
+# JSON string or null.
+jstr() {
+  if [ -n "$1" ]; then printf '"%s"' "$(json_escape "$1")"; else printf 'null'; fi
+}
+
+# JSON number or null.
+jnum() {
+  if [ -n "$1" ]; then printf '%s' "$1"; else printf 'null'; fi
+}
+
+# Float comparison without bc: succeeds when $1 > $2.
+gt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 > b + 0) }'; }
+
+JSON=0 PROBES=1 IFACE="" TARGET="1.1.1.1" DNS_NAME="apple.com" COUNT=3
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -j | --json) JSON=1 ;;
+    --no-network) PROBES=0 ;;
+    -i | --interface | -t | --target | -d | --dns-name | -c | --count)
+      [ "$#" -ge 2 ] || die "$EX_USAGE" "$1 needs a value"
+      case "$1" in
+        -i | --interface) IFACE="$2" ;;
+        -t | --target) TARGET="$2" ;;
+        -d | --dns-name) DNS_NAME="$2" ;;
+        -c | --count) COUNT="$2" ;;
+      esac
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit "$EX_OK"
+      ;;
+    -V | --version)
+      printf '%s %s\n' "$PROG" "$VERSION"
+      exit "$EX_OK"
+      ;;
+    *) die "$EX_USAGE" "unknown argument: $1 (see --help)" ;;
+  esac
+  shift
+done
+
+case "$COUNT" in
+  '' | *[!0-9]* | 0) die "$EX_USAGE" "--count must be a positive whole number" ;;
+esac
+case "$IFACE" in
+  *[!A-Za-z0-9]*) die "$EX_USAGE" "--interface must look like en0" ;;
+esac
+
+[ "$(uname -s)" = "Darwin" ] || die "$EX_UNAVAILABLE" "wifi-diag only runs on macOS"
+for cmd in route ipconfig networksetup scutil; do
+  command -v "$cmd" >/dev/null 2>&1 || die "$EX_UNAVAILABLE" "required command not found: $cmd"
+done
+
+# ---------------------------------------------------------------- facts
+
+ROUTE_OUT="$(route -n get default 2>/dev/null || true)"
+GATEWAY="$(printf '%s\n' "$ROUTE_OUT" | awk -F': ' '/^ *gateway:/ { print $2; exit }')"
+DEFAULT_IFACE="$(printf '%s\n' "$ROUTE_OUT" | awk -F': ' '/^ *interface:/ { print $2; exit }')"
+[ -n "$IFACE" ] || IFACE="$DEFAULT_IFACE"
+
+HW_PORT=""
+if [ -n "$IFACE" ]; then
+  HW_PORT="$(networksetup -listallhardwareports 2>/dev/null | awk -v dev="$IFACE" '
+    /^Hardware Port:/ { port = substr($0, 16) }
+    /^Device:/ && $2 == dev { print port; exit }
+  ')"
+fi
+
+IPV4=""
+[ -z "$IFACE" ] || IPV4="$(ipconfig getifaddr "$IFACE" 2>/dev/null || true)"
+
+# Wi-Fi network name. Recent macOS redacts it unless the calling app has
+# Location Services, so "redacted" is a normal, honest answer.
+SSID="" SSID_STATUS="not_wifi"
+if [ "$HW_PORT" = "Wi-Fi" ] || [ "$HW_PORT" = "AirPort" ]; then
+  SSID_STATUS="not_associated"
+  air="$(networksetup -getairportnetwork "$IFACE" 2>/dev/null || true)"
+  case "$air" in
+    "Current Wi-Fi Network: "*)
+      SSID="${air#Current Wi-Fi Network: }"
+      SSID_STATUS="associated"
+      ;;
+  esac
+  if [ -z "$SSID" ]; then
+    summary_ssid="$(ipconfig getsummary "$IFACE" 2>/dev/null | awk -F' : ' '/^ +SSID : / { print $2; exit }')"
+    case "$summary_ssid" in
+      "") ;;
+      "<redacted>") SSID_STATUS="redacted" ;;
+      *)
+        SSID="$summary_ssid"
+        SSID_STATUS="associated"
+        ;;
+    esac
+  fi
+fi
+
+DNS_SERVERS="$(scutil --dns 2>/dev/null | awk '
+  /^resolver #/ { n++ }
+  n == 1 && /nameserver\[[0-9]+\]/ { sub(/.*: /, ""); if (!seen[$0]++) out = out (out == "" ? "" : ",") $0 }
+  END { print out }
+')"
+
+# ---------------------------------------------------------------- checks
+
+CHECK_NAMES=() CHECK_STATUS=() CHECK_DETAIL=() CHECK_AVG=() CHECK_LOSS=()
+
+add_check() {
+  CHECK_NAMES+=("$1")
+  CHECK_STATUS+=("$2")
+  CHECK_DETAIL+=("$3")
+  CHECK_AVG+=("${4:-}")
+  CHECK_LOSS+=("${5:-}")
+}
+
+# ping_probe NAME HOST WARN_MS
+ping_probe() {
+  local name="$1" host="$2" warn_ms="$3" out loss avg
+  out="$(ping -c "$COUNT" -q -t 5 "$host" 2>&1 || true)"
+  loss="$(printf '%s\n' "$out" | awk '/packet loss/ { for (i = 1; i <= NF; i++) if ($i ~ /%$/) { sub(/%/, "", $i); print $i; exit } }')"
+  avg="$(printf '%s\n' "$out" | awk -F'= ' '/^(round-trip|rtt)/ { split($2, v, "/"); print v[2]; exit }')"
+  if [ -z "$loss" ] || [ -z "$avg" ]; then
+    add_check "$name" fail "$host did not answer" "" "${loss:-100}"
+  elif gt "$loss" 0; then
+    add_check "$name" warn "avg ${avg} ms to $host, ${loss}% loss" "$avg" "$loss"
+  elif gt "$avg" "$warn_ms"; then
+    add_check "$name" warn "avg ${avg} ms to $host, above ${warn_ms} ms" "$avg" "$loss"
+  else
+    add_check "$name" ok "avg ${avg} ms to $host, 0% loss" "$avg" "$loss"
+  fi
+}
+
+if [ -z "$DEFAULT_IFACE" ]; then
+  add_check default_route fail "no default route, the Mac is offline"
+else
+  add_check default_route ok "via $GATEWAY on $DEFAULT_IFACE"
+fi
+
+if [ "$PROBES" -eq 0 ]; then
+  for name in gateway_latency internet_latency dns_resolution captive_portal; do
+    add_check "$name" skipped "--no-network"
+  done
+elif [ -z "$DEFAULT_IFACE" ]; then
+  for name in gateway_latency internet_latency dns_resolution captive_portal; do
+    add_check "$name" fail "no default route"
+  done
+else
+  if [ -n "$GATEWAY" ]; then
+    ping_probe gateway_latency "$GATEWAY" "$GATEWAY_WARN_MS"
+  else
+    add_check gateway_latency skipped "point-to-point route, no gateway address"
+  fi
+  ping_probe internet_latency "$TARGET" "$INTERNET_WARN_MS"
+
+  resolved="$(dscacheutil -q host -a name "$DNS_NAME" 2>/dev/null | awk '/^ip(v6)?_address:/ { print $2; exit }' || true)"
+  if [ -n "$resolved" ]; then
+    add_check dns_resolution ok "$DNS_NAME resolved to $resolved"
+  else
+    add_check dns_resolution fail "$DNS_NAME did not resolve"
+  fi
+
+  body="$(curl -s -m 5 "$CAPTIVE_URL" 2>/dev/null || true)"
+  case "$body" in
+    *"<TITLE>Success</TITLE>"*) add_check captive_portal ok "open internet, captive.apple.com answered Success" ;;
+    "") add_check captive_portal fail "captive.apple.com did not answer" ;;
+    *) add_check captive_portal warn "captive portal detected, sign in through the browser" ;;
+  esac
+fi
+
+OVERALL="ok"
+EXIT_CODE="$EX_OK"
+i=0
+while [ "$i" -lt "${#CHECK_NAMES[@]}" ]; do
+  case "${CHECK_STATUS[$i]}" in
+    fail)
+      OVERALL="fail"
+      EXIT_CODE="$EX_FAIL"
+      ;;
+    warn)
+      if [ "$OVERALL" = "ok" ]; then
+        OVERALL="warn"
+        EXIT_CODE="$EX_WARN"
+      fi
+      ;;
+  esac
+  i=$((i + 1))
+done
+
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# ---------------------------------------------------------------- output
+
+if [ "$JSON" -eq 1 ]; then
+  printf '{\n'
+  printf '  "tool": "%s",\n  "version": "%s",\n  "timestamp": "%s",\n' "$PROG" "$VERSION" "$NOW"
+  printf '  "interface": {"name": %s, "hardware_port": %s, "ipv4": %s, "gateway": %s, "ssid": %s, "ssid_status": "%s"},\n' \
+    "$(jstr "$IFACE")" "$(jstr "$HW_PORT")" "$(jstr "$IPV4")" "$(jstr "$GATEWAY")" "$(jstr "$SSID")" "$SSID_STATUS"
+  printf '  "dns": {"servers": ['
+  sep=""
+  IFS_SAVE="$IFS"
+  IFS=','
+  for s in $DNS_SERVERS; do
+    printf '%s"%s"' "$sep" "$(json_escape "$s")"
+    sep=", "
+  done
+  IFS="$IFS_SAVE"
+  printf ']},\n  "checks": [\n'
+  i=0
+  while [ "$i" -lt "${#CHECK_NAMES[@]}" ]; do
+    [ "$i" -eq 0 ] || printf ',\n'
+    printf '    {"name": "%s", "status": "%s", "detail": %s, "avg_ms": %s, "loss_pct": %s}' \
+      "${CHECK_NAMES[$i]}" "${CHECK_STATUS[$i]}" "$(jstr "${CHECK_DETAIL[$i]}")" \
+      "$(jnum "${CHECK_AVG[$i]}")" "$(jnum "${CHECK_LOSS[$i]}")"
+    i=$((i + 1))
+  done
+  printf '\n  ],\n  "overall": "%s"\n}\n' "$OVERALL"
+  exit "$EXIT_CODE"
+fi
+
+case "$SSID_STATUS" in
+  associated) ssid_line="$SSID" ;;
+  redacted) ssid_line="hidden by macOS (grant Location Services to the terminal to show it)" ;;
+  not_associated) ssid_line="not associated" ;;
+  *) ssid_line="not a Wi-Fi interface" ;;
+esac
+
+printf '%s %s, %s\n\n' "$PROG" "$VERSION" "$NOW"
+printf '%-14s %s\n' "Interface" "${IFACE:--}${HW_PORT:+ ($HW_PORT)}"
+printf '%-14s %s\n' "Wi-Fi network" "$ssid_line"
+printf '%-14s %s\n' "IPv4 address" "${IPV4:--}"
+printf '%-14s %s\n' "Gateway" "${GATEWAY:--}"
+printf '%-14s %s\n\n' "DNS servers" "$(printf '%s' "${DNS_SERVERS:--}" | sed 's/,/, /g')"
+printf '%-18s %-8s %s\n' "CHECK" "RESULT" "DETAIL"
+i=0
+while [ "$i" -lt "${#CHECK_NAMES[@]}" ]; do
+  printf '%-18s %-8s %s\n' "${CHECK_NAMES[$i]}" "${CHECK_STATUS[$i]}" "${CHECK_DETAIL[$i]}"
+  i=$((i + 1))
+done
+printf '\nOverall: %s\n' "$OVERALL"
+exit "$EXIT_CODE"

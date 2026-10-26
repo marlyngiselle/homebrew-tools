@@ -1,0 +1,80 @@
+.TH WIFI-DIAG 1 "October 26, 2026" "homebrew-tools" "User Commands"
+.SH NAME
+wifi-diag \- one\-screen network diagnostics for macOS
+.SH SYNOPSIS
+.B wifi-diag
+[\fB\-j\fR] [\fB\-i\fR \fIIF\fR] [\fB\-t\fR \fIHOST\fR] [\fB\-d\fR \fINAME\fR]
+[\fB\-c\fR \fIN\fR] [\fB\-\-no\-network\fR]
+.SH DESCRIPTION
+.B wifi-diag
+summarises the active network connection using only commands that ship
+with macOS:
+.BR route (8),
+.BR ipconfig (8),
+.BR networksetup (8),
+.BR scutil (8),
+.BR dscacheutil (1),
+.BR ping (8)
+and
+.BR curl (1).
+It never needs sudo and never changes the configuration.
+.PP
+It reports the default\-route interface and its hardware port, the Wi\-Fi
+network name, the IPv4 address, the gateway and the DNS servers of the
+primary resolver, then runs five checks: default route, gateway latency,
+internet latency, name resolution and captive portal.
+.PP
+Recent macOS versions hide the Wi\-Fi network name from processes without
+Location Services. wifi\-diag then reports it as hidden instead of failing.
+.SH OPTIONS
+.TP
+.BR \-j ", " \-\-json
+Print the report as JSON.
+.TP
+.BR \-i ", " \-\-interface " " \fIIF\fR
+Inspect \fIIF\fR instead of the default\-route interface.
+.TP
+.BR \-t ", " \-\-target " " \fIHOST\fR
+Host for the internet latency probe. Default 1.1.1.1.
+.TP
+.BR \-d ", " \-\-dns\-name " " \fINAME\fR
+Name to resolve for the DNS check. Default apple.com.
+.TP
+.BR \-c ", " \-\-count " " \fIN\fR
+Pings per probe. Default 3.
+.TP
+.B \-\-no\-network
+Skip the active probes (ping, DNS lookup, captive portal request).
+.TP
+.BR \-h ", " \-\-help
+Show usage.
+.TP
+.BR \-V ", " \-\-version
+Show the version.
+.SH EXIT STATUS
+.TP
+.B 0
+Every check passed.
+.TP
+.B 1
+At least one check is degraded: gateway above 30 ms, internet above 150 ms,
+packet loss, or a captive portal.
+.TP
+.B 2
+No connectivity: no default route, or a probe got no answer.
+.TP
+.B 64
+Usage error.
+.TP
+.B 69
+Not macOS, or a required system command is missing.
+.SH EXAMPLES
+.nf
+wifi\-diag
+wifi\-diag \-\-json | jq '.checks[] | select(.status != "ok")'
+wifi\-diag \-\-no\-network \-\-interface en1
+.fi
+.SH SEE ALSO
+.BR networksetup (8),
+.BR scutil (8),
+.BR ping (8)
