@@ -1,0 +1,16 @@
+# Release build output
+/dist/
+
+# Bottles and their metadata from local brew test-bot or brew bottle runs
+*.bottle.tar.gz
+*.bottle.json
+/bottles/
+
+# Editors and OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Test leftovers
+*.bak
